@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card" style="max-width: 800px; padding: 2rem;">
+    <h1>Live Defect Detection</h1>
+    <p style="color: #666;">Analysis in real-time using your webcam.</p>
+
+    <div class="video-container" style="margin-bottom: 20px;">
+        <!-- The JS will dynamically update this image source -->
+        <img id="videoStream" src="#" alt="Live Video Feed" style="width: 100%; height: auto;">
+    </div>
+    
+    <!-- DETECTON BAR IMPLEMENTATION -->
+    <div style="text-align: left; margin-top: 15px;">
+        <h2 style="font-size: 1.4rem; color: #4a4a4a; margin-bottom: 5px;">
+            Current Defect: <span id="defectLabel" style="font-weight: bold; color: #6c5ce7;">---</span>
+        </h2>
+        
+        <p style="font-size: 0.9rem; color: #888; margin-bottom: 5px;">Confidence:</p>
+        <div style="background: #f0f0f0; border-radius: 10px; height: 30px; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">
+            <div id="confidenceBar" style="height: 100%; width: 0%; background: linear-gradient(to right, #4facfe 0%, #00f2fe 100%); transition: width 0.3s ease-out;">
+                <span id="confidenceText" style="display: block; line-height: 30px; text-align: right; padding-right: 10px; color: white; font-weight: bold; text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">0.0%</span>
+            </div>
+        </div>
+    </div>
+    <!-- END DETECTON BAR IMPLEMENTATION -->
+
+    <div style="margin-top: 30px;">
+        <a href="{{ url_for('home') }}" class="btn btn-primary" style="background: #ff6b6b; width: 100px;">Stop / Back</a>
+    </div>
+</div>
+
+<script>
+    // This script reads the multipart stream where the JSON prediction is embedded 
+    // before the JPEG image data.
+    const defectLabel = document.getElementById('defectLabel');
+    const confidenceBar = document.getElementById('confidenceBar');
+    const confidenceText = document.getElementById('confidenceText');
+    const videoStreamImg = document.getElementById('videoStream');
+    const videoFeedUrl = "{{ url_for('video_feed') }}";
+
+    const decoder = new TextDecoder('utf-8');
+    const encoder = new TextEncoder();
+    
+    // Byte sequence markers for reliable parsing
+    const FRAME_BOUNDARY_PREFIX = encoder.encode('--frame\r\n');
+    const JSON_HEADER_END = encoder.encode('\r\n\r\n');
+    const IMAGE_HEADER_START = encoder.encode('Content-Type: image/jpeg\r\n\r\n');
+    
+    let buffer = new Uint8Array(0);
+    let currentObjectUrl = null;
+
+    // Utility function to search for a byte sequence within a larger buffer
+    function searchBuffer(haystack, needle, offset = 0) {
+        for (let i = offset; i <= haystack.length - needle.length; i++) {
+            let match = true;
+            for (let j = 0; j < needle.length; j++) {
+                if (haystack[i + j] !== needle[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return i;
+        }
+        return -1;
+    }
+
+    function processStream() {
+        // Clear previous Object URL if any
+        if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+        }
+        
+        fetch(videoFeedUrl)
+            .then(response => {
+                const reader = response.body.getReader();
+                buffer = new Uint8Array(0); // Reset buffer on new fetch
+
+                function readLoop() {
+                    reader.read().then(({ done, value }) => {
+                        if (done) {
+                            console.log('Stream finished. Attempting reconnect.');
+                            setTimeout(processStream, 5000); 
+                            return;
+                        }
+
+                        // Append new data to buffer
+                        let newBuffer = new Uint8Array(buffer.length + value.length);
+                        newBuffer.set(buffer, 0);
+                        newBuffer.set(value, buffer.length);
+                        buffer = newBuffer;
+
+                        let frameStartIndex = searchBuffer(buffer, FRAME_BOUNDARY_PREFIX);
+                        
+                        // Wait until we have at least the start of the next frame
+                        while (frameStartIndex !== -1) {
+                            // Find the end of the JSON content part
+                            const jsonEnd = searchBuffer(buffer, IMAGE_HEADER_START, frameStartIndex + FRAME_BOUNDARY_PREFIX.length);
+                            
+                            if (jsonEnd === -1) {
+                                // Incomplete frame block, need more data
+                                break; 
+                            }
+                            
+                            // 1. Extract JSON Data
+                            // JSON data is located between the first \r\n\r\n (end of JSON headers) and the IMAGE_HEADER_START
+                            // Let's find the end of the JSON part headers (Content-Type: application/json\r\n\r\n)
+                            const jsonContentStart = searchBuffer(buffer, JSON_HEADER_END, frameStartIndex);
+                            
+                            if (jsonContentStart !== -1 && jsonContentStart < jsonEnd) {
+                                const jsonBytes = buffer.subarray(jsonContentStart + JSON_HEADER_END.length, jsonEnd);
+                                
+                                try {
+                                    const jsonString = decoder.decode(jsonBytes).trim();
+                                    const prediction = JSON.parse(jsonString);
+                                    
+                                    // Update UI with Prediction Data
+                                    const confidence = Math.min(100, prediction.confidence || 0); 
+                                    const defect = prediction.class || "Unknown";
+
+                                    defectLabel.textContent = defect;
+                                    confidenceBar.style.width = `${confidence}%`;
+                                    confidenceText.textContent = `${confidence.toFixed(1)}%`;
+                                    
+                                    let barColor = confidence > 85 ? '#43e97b' : 
+                                                   confidence > 50 ? '#ffc371' : '#ff5f6d';
+                                    confidenceBar.style.background = barColor;
+
+                                } catch (e) {
+                                    console.error("Error parsing prediction JSON:", e);
+                                }
+                            }
+
+                            // 2. Extract Image Data
+                            // Image data starts right after IMAGE_HEADER_START and goes up to the next FRAME_BOUNDARY_PREFIX.
+                            const imageStart = jsonEnd + IMAGE_HEADER_START.length;
+                            const nextFrameBoundary = searchBuffer(buffer, FRAME_BOUNDARY_PREFIX, imageStart);
+                            
+                            if (nextFrameBoundary === -1) {
+                                // Image data is incomplete, wait for the next boundary
+                                break; 
+                            }
+                            
+                            const imageBytes = buffer.subarray(imageStart, nextFrameBoundary - 2); // -2 to remove trailing \r\n
+                            
+                            // Update Image
+                            const imageBlob = new Blob([imageBytes], { type: 'image/jpeg' });
+                            if (currentObjectUrl) {
+                                URL.revokeObjectURL(currentObjectUrl);
+                            }
+                            currentObjectUrl = URL.createObjectURL(imageBlob);
+                            videoStreamImg.src = currentObjectUrl;
+
+                            // 3. Advance buffer past the processed frame block
+                            buffer = buffer.subarray(nextFrameBoundary);
+                            
+                            // Check if more complete frames exist in the remaining buffer
+                            frameStartIndex = searchBuffer(buffer, FRAME_BOUNDARY_PREFIX);
+                        }
+
+                        // Continue reading the stream
+                        readLoop();
+
+                    }).catch(error => {
+                        console.error('Stream read error, attempting reconnect:', error);
+                        setTimeout(processStream, 5000);
+                    });
+                }
+                
+                readLoop();
+
+            })
+            .catch(error => {
+                console.error('Fetch error, attempting reconnect:', error);
+                setTimeout(processStream, 5000);
+            });
+    }
+
+    window.onload = function() {
+        processStream();
+    }
+</script>
+{% endblock %}

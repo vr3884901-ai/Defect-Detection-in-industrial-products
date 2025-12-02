@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+    <h1>Dashboard</h1>
+    <p>Select a detection mode to begin</p>
+    
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 15px; margin-top: 30px;">
+        <a href="{{ url_for('detect_live') }}" class="btn btn-primary">
+            🎥 Live Detection
+        </a>
+        
+        <a href="{{ url_for('detect_image') }}" class="btn btn-secondary">
+            🖼️ Image Detection
+        </a>
+    </div>
+</div>
+{% endblock %}
